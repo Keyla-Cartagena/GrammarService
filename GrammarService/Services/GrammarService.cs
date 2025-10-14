@@ -1,18 +1,44 @@
 ﻿using GrammarService.Models;
+using System.Text.RegularExpressions;
 
 namespace GrammarService.Services
 {
     public class GrammarService
     {
+        // Cache para evitar recalcular conjuntos
+        private Dictionary<string, HashSet<string>> _firstCache = new();
+        private Dictionary<string, HashSet<string>> _followCache = new();
+
+        /// <summary>
+        /// Limpia el cache antes de calcular nuevos conjuntos
+        /// </summary>
+        public void ClearCache()
+        {
+            _firstCache.Clear();
+            _followCache.Clear();
+        }
+
         /// <summary>
         /// Calcula el conjunto FIRST de un símbolo no terminal
         /// </summary>
         public HashSet<string> ComputeFirst(Grammar grammar, string symbol)
         {
+            // Verificar cache
+            if (_firstCache.ContainsKey(symbol))
+                return new HashSet<string>(_firstCache[symbol]);
+
             var first = new HashSet<string>();
             var visited = new HashSet<string>();
 
-            ComputeFirstRecursive(grammar, symbol, first, visited);
+            try
+            {
+                ComputeFirstRecursive(grammar, symbol, first, visited);
+                _firstCache[symbol] = new HashSet<string>(first);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Error calculando FIRST de '{symbol}': {ex.Message}", ex);
+            }
 
             return first;
         }
@@ -26,13 +52,18 @@ namespace GrammarService.Services
             visited.Add(symbol);
 
             // Obtener todas las producciones del símbolo
-            var productions = grammar.Productions.Where(p => p.NonTerminal == symbol);
+            var productions = grammar.Productions.Where(p => p.NonTerminal == symbol).ToList();
+
+            if (!productions.Any())
+            {
+                throw new InvalidOperationException($"No se encontraron producciones para el símbolo '{symbol}'");
+            }
 
             foreach (var prod in productions)
             {
                 if (string.IsNullOrEmpty(prod.RightSide))
                 {
-                    first.Add("ε"); // Producción vacía
+                    first.Add("ε");
                     continue;
                 }
 
@@ -49,18 +80,43 @@ namespace GrammarService.Services
                         continue;
                     }
 
-                    // Obtener el primer símbolo
-                    var firstChar = trimmedAlt[0].ToString();
+                    // Procesar la secuencia de símbolos
+                    bool allHaveEpsilon = true;
 
-                    // Si es terminal (minúscula o símbolo especial)
-                    if (char.IsLower(trimmedAlt[0]) || !char.IsLetter(trimmedAlt[0]))
+                    for (int i = 0; i < trimmedAlt.Length && allHaveEpsilon; i++)
                     {
-                        first.Add(firstChar);
+                        var currentSymbol = trimmedAlt[i].ToString();
+
+                        // Si es terminal
+                        if (IsTerminal(trimmedAlt[i]))
+                        {
+                            first.Add(currentSymbol);
+                            allHaveEpsilon = false;
+                        }
+                        // Si es no terminal
+                        else if (IsNonTerminal(trimmedAlt[i]))
+                        {
+                            var firstOfSymbol = new HashSet<string>();
+                            ComputeFirstRecursive(grammar, currentSymbol, firstOfSymbol, visited);
+
+                            // Agregar todo excepto ε
+                            foreach (var f in firstOfSymbol.Where(x => x != "ε"))
+                            {
+                                first.Add(f);
+                            }
+
+                            // Si no contiene ε, detenerse
+                            if (!firstOfSymbol.Contains("ε"))
+                            {
+                                allHaveEpsilon = false;
+                            }
+                        }
                     }
-                    // Si es no terminal (mayúscula)
-                    else if (char.IsUpper(trimmedAlt[0]))
+
+                    // Si todos los símbolos pueden derivar ε
+                    if (allHaveEpsilon)
                     {
-                        ComputeFirstRecursive(grammar, firstChar, first, visited);
+                        first.Add("ε");
                     }
                 }
             }
@@ -71,71 +127,136 @@ namespace GrammarService.Services
         /// </summary>
         public HashSet<string> ComputeFollow(Grammar grammar, string symbol)
         {
-            var follow = new HashSet<string>();
-
-            // Regla 1: $ está en FOLLOW del símbolo inicial
-            if (symbol == grammar.StartSymbol)
+            // Limpiar cache para nueva gramática
+            if (_followCache.Count == 0)
             {
-                follow.Add("$");
+                try
+                {
+                    ComputeAllFollows(grammar);
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException($"Error calculando FOLLOW: {ex.Message}", ex);
+                }
             }
 
-            // Buscar todas las producciones donde aparece el símbolo
-            foreach (var prod in grammar.Productions)
+            return _followCache.ContainsKey(symbol)
+                ? new HashSet<string>(_followCache[symbol])
+                : new HashSet<string>();
+        }
+
+        /// <summary>
+        /// Calcula todos los conjuntos FOLLOW de una vez para evitar recursión infinita
+        /// </summary>
+        private void ComputeAllFollows(Grammar grammar)
+        {
+            // Inicializar conjuntos FOLLOW vacíos
+            var follows = new Dictionary<string, HashSet<string>>();
+            var nonTerminals = grammar.Productions.Select(p => p.NonTerminal).Distinct().ToList();
+
+            foreach (var nt in nonTerminals)
             {
-                var alternatives = prod.RightSide.Split(',', StringSplitOptions.RemoveEmptyEntries);
+                follows[nt] = new HashSet<string>();
+            }
 
-                foreach (var alt in alternatives)
+            // Regla 1: $ en FOLLOW del símbolo inicial
+            if (!string.IsNullOrEmpty(grammar.StartSymbol))
+            {
+                follows[grammar.StartSymbol].Add("$");
+            }
+
+            // Iterar hasta que no haya cambios (punto fijo)
+            bool changed = true;
+            int iterations = 0;
+            const int maxIterations = 100; // Prevenir ciclos infinitos
+
+            while (changed && iterations < maxIterations)
+            {
+                changed = false;
+                iterations++;
+
+                foreach (var prod in grammar.Productions)
                 {
-                    var trimmedAlt = alt.Trim();
-                    int index = trimmedAlt.IndexOf(symbol);
+                    var alternatives = prod.RightSide?.Split(',', StringSplitOptions.RemoveEmptyEntries) ?? Array.Empty<string>();
 
-                    if (index >= 0)
+                    foreach (var alt in alternatives)
                     {
-                        // Si hay símbolos después
-                        if (index + 1 < trimmedAlt.Length)
+                        var trimmedAlt = alt.Trim();
+
+                        if (string.IsNullOrEmpty(trimmedAlt))
+                            continue;
+
+                        // Buscar cada símbolo no terminal en la producción
+                        for (int i = 0; i < trimmedAlt.Length; i++)
                         {
-                            var nextChar = trimmedAlt[index + 1].ToString();
+                            var currentSymbol = trimmedAlt[i].ToString();
 
-                            // Si el siguiente es terminal
-                            if (char.IsLower(trimmedAlt[index + 1]) || !char.IsLetter(trimmedAlt[index + 1]))
+                            // Solo procesar no terminales
+                            if (!IsNonTerminal(trimmedAlt[i]))
+                                continue;
+
+                            if (!follows.ContainsKey(currentSymbol))
+                                follows[currentSymbol] = new HashSet<string>();
+
+                            // Símbolos después del actual
+                            bool allCanBeEpsilon = true;
+
+                            for (int j = i + 1; j < trimmedAlt.Length; j++)
                             {
-                                follow.Add(nextChar);
-                            }
-                            // Si el siguiente es no terminal
-                            else if (char.IsUpper(trimmedAlt[index + 1]))
-                            {
-                                var firstOfNext = ComputeFirst(grammar, nextChar);
-                                foreach (var f in firstOfNext)
+                                var nextSymbol = trimmedAlt[j].ToString();
+
+                                if (IsTerminal(trimmedAlt[j]))
                                 {
-                                    if (f != "ε")
-                                        follow.Add(f);
+                                    // Agregar terminal a FOLLOW
+                                    if (follows[currentSymbol].Add(nextSymbol))
+                                        changed = true;
+                                    allCanBeEpsilon = false;
+                                    break;
                                 }
-
-                                // Si FIRST del siguiente contiene ε, agregar FOLLOW del no terminal actual
-                                if (firstOfNext.Contains("ε"))
+                                else if (IsNonTerminal(trimmedAlt[j]))
                                 {
-                                    if (prod.NonTerminal != symbol)
+                                    // Agregar FIRST del siguiente (sin ε)
+                                    var firstOfNext = ComputeFirst(grammar, nextSymbol);
+
+                                    foreach (var f in firstOfNext.Where(x => x != "ε"))
                                     {
-                                        var followOfProduction = ComputeFollow(grammar, prod.NonTerminal);
-                                        follow.UnionWith(followOfProduction);
+                                        if (follows[currentSymbol].Add(f))
+                                            changed = true;
+                                    }
+
+                                    // Si no tiene ε, detenerse
+                                    if (!firstOfNext.Contains("ε"))
+                                    {
+                                        allCanBeEpsilon = false;
+                                        break;
                                     }
                                 }
                             }
-                        }
-                        // Si está al final de la producción
-                        else
-                        {
-                            if (prod.NonTerminal != symbol)
+
+                            // Si está al final o todos pueden ser ε
+                            if (allCanBeEpsilon && prod.NonTerminal != currentSymbol)
                             {
-                                var followOfProduction = ComputeFollow(grammar, prod.NonTerminal);
-                                follow.UnionWith(followOfProduction);
+                                if (!follows.ContainsKey(prod.NonTerminal))
+                                    follows[prod.NonTerminal] = new HashSet<string>();
+
+                                // Agregar FOLLOW del lado izquierdo
+                                var sizeBefore = follows[currentSymbol].Count;
+                                follows[currentSymbol].UnionWith(follows[prod.NonTerminal]);
+
+                                if (follows[currentSymbol].Count > sizeBefore)
+                                    changed = true;
                             }
                         }
                     }
                 }
             }
 
-            return follow;
+            if (iterations >= maxIterations)
+            {
+                throw new InvalidOperationException("Se alcanzó el límite de iteraciones calculando FOLLOW. Posible gramática inválida.");
+            }
+
+            _followCache = follows;
         }
 
         /// <summary>
@@ -145,16 +266,14 @@ namespace GrammarService.Services
         {
             var predict = new HashSet<string>();
 
-            // PREDICT = FIRST(α) si ε no está en FIRST(α)
-            // PREDICT = (FIRST(α) - {ε}) ∪ FOLLOW(A) si ε está en FIRST(α)
+            try
+            {
+                if (string.IsNullOrEmpty(production.RightSide))
+                {
+                    predict.UnionWith(ComputeFollow(grammar, production.NonTerminal));
+                    return predict;
+                }
 
-            if (string.IsNullOrEmpty(production.RightSide))
-            {
-                // Producción vacía: PREDICT = FOLLOW(A)
-                predict.UnionWith(ComputeFollow(grammar, production.NonTerminal));
-            }
-            else
-            {
                 var alternatives = production.RightSide.Split(',', StringSplitOptions.RemoveEmptyEntries);
 
                 foreach (var alt in alternatives)
@@ -167,31 +286,42 @@ namespace GrammarService.Services
                         continue;
                     }
 
-                    var firstChar = trimmedAlt[0].ToString();
+                    bool allHaveEpsilon = true;
 
-                    // Terminal
-                    if (char.IsLower(trimmedAlt[0]) || !char.IsLetter(trimmedAlt[0]))
+                    for (int i = 0; i < trimmedAlt.Length && allHaveEpsilon; i++)
                     {
-                        predict.Add(firstChar);
-                    }
-                    // No terminal
-                    else if (char.IsUpper(trimmedAlt[0]))
-                    {
-                        var firstOfSymbol = ComputeFirst(grammar, firstChar);
+                        var currentSymbol = trimmedAlt[i].ToString();
 
-                        foreach (var f in firstOfSymbol)
+                        if (IsTerminal(trimmedAlt[i]))
                         {
-                            if (f != "ε")
+                            predict.Add(currentSymbol);
+                            allHaveEpsilon = false;
+                        }
+                        else if (IsNonTerminal(trimmedAlt[i]))
+                        {
+                            var firstOfSymbol = ComputeFirst(grammar, currentSymbol);
+
+                            foreach (var f in firstOfSymbol.Where(x => x != "ε"))
+                            {
                                 predict.Add(f);
-                        }
+                            }
 
-                        // Si contiene ε, agregar FOLLOW
-                        if (firstOfSymbol.Contains("ε"))
-                        {
-                            predict.UnionWith(ComputeFollow(grammar, production.NonTerminal));
+                            if (!firstOfSymbol.Contains("ε"))
+                            {
+                                allHaveEpsilon = false;
+                            }
                         }
+                    }
+
+                    if (allHaveEpsilon)
+                    {
+                        predict.UnionWith(ComputeFollow(grammar, production.NonTerminal));
                     }
                 }
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"Error calculando PREDICT de producción '{production.NonTerminal} -> {production.RightSide}': {ex.Message}", ex);
             }
 
             return predict;
