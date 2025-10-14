@@ -1,0 +1,6 @@
+@GrammarService_HostAddress = http://localhost:5172
+
+GET {{GrammarService_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
