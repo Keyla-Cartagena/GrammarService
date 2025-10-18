@@ -23,6 +23,148 @@ namespace GrammarService.Controllers
             _context = context;
         }
 
+        /// <summary>
+        /// Crea una nueva gramática
+        /// </summary>
+        [HttpPost]
+        public async Task<IActionResult> CreateGrammar([FromBody] CreateGrammarRequest request)
+        {
+            try
+            {
+                // Validar el request
+                if (request == null)
+                {
+                    return BadRequest(new { error = "El cuerpo de la solicitud no puede estar vacío" });
+                }
+
+                if (string.IsNullOrWhiteSpace(request.StartSymbol))
+                {
+                    return BadRequest(new { error = "El símbolo inicial es requerido" });
+                }
+
+                if (request.Productions == null || !request.Productions.Any())
+                {
+                    return BadRequest(new { error = "Debe proporcionar al menos una producción" });
+                }
+
+                // Validar que exista una producción para el símbolo inicial
+                if (!request.Productions.Any(p => p.NonTerminal == request.StartSymbol))
+                {
+                    return BadRequest(new { error = $"Debe existir al menos una producción para el símbolo inicial '{request.StartSymbol}'" });
+                }
+
+                // Crear la gramática
+                var grammar = new Grammar
+                {
+                    Id = Guid.NewGuid().ToString(),
+                    StartSymbol = request.StartSymbol,
+                    Productions = new List<Production>()
+                };
+
+                // Agregar las producciones
+                foreach (var prodRequest in request.Productions)
+                {
+                    if (string.IsNullOrWhiteSpace(prodRequest.NonTerminal))
+                    {
+                        return BadRequest(new { error = "Todas las producciones deben tener un no terminal" });
+                    }
+
+                    if (string.IsNullOrWhiteSpace(prodRequest.RightSide))
+                    {
+                        return BadRequest(new { error = $"La producción del no terminal '{prodRequest.NonTerminal}' no puede tener el lado derecho vacío" });
+                    }
+
+                    var production = new Production
+                    {
+                        NonTerminal = prodRequest.NonTerminal.Trim(),
+                        RightSide = prodRequest.RightSide.Trim(),
+                        GrammarId = grammar.Id
+                    };
+
+                    grammar.Productions.Add(production);
+                }
+
+                // Guardar en la base de datos
+                _context.Grammars.Add(grammar);
+                await _context.SaveChangesAsync();
+
+                _logger.LogInformation($"Gramática {grammar.Id} creada exitosamente con {grammar.Productions.Count} producciones");
+
+                // Retornar la gramática creada
+                return CreatedAtAction(
+                    nameof(GetGrammarById),
+                    new { id = grammar.Id },
+                    new
+                    {
+                        id = grammar.Id,
+                        startSymbol = grammar.StartSymbol,
+                        productions = grammar.Productions.Select(p => new
+                        {
+                            nonTerminal = p.NonTerminal,
+                            rightSide = p.RightSide
+                        }).ToList()
+                    });
+            }
+            catch (DbUpdateException ex)
+            {
+                _logger.LogError(ex, "Error al guardar la gramática en la base de datos");
+                return StatusCode(500, new
+                {
+                    error = "Error al guardar en la base de datos",
+                    message = "No se pudo guardar la gramática. Por favor, intenta nuevamente.",
+                    requestId = HttpContext.TraceIdentifier
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error inesperado al crear la gramática");
+                return StatusCode(500, new
+                {
+                    error = "Error interno del servidor",
+                    message = "Ocurrió un error procesando la solicitud.",
+                    requestId = HttpContext.TraceIdentifier
+                });
+            }
+        }
+
+        /// <summary>
+        /// Obtiene una gramática por su ID
+        /// </summary>
+        [HttpGet("{id}")]
+        public async Task<IActionResult> GetGrammarById(string id)
+        {
+            try
+            {
+                var grammar = await GetGrammarByIdAsync(id);
+
+                if (grammar == null)
+                {
+                    return NotFound(new { error = "Gramática no encontrada" });
+                }
+
+                return Ok(new
+                {
+                    id = grammar.Id,
+                    startSymbol = grammar.StartSymbol,
+                    productions = grammar.Productions.Select(p => new
+                    {
+                        nonTerminal = p.NonTerminal,
+                        rightSide = p.RightSide
+                    }).ToList()
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error obteniendo gramática {id}");
+                return StatusCode(500, new
+                {
+                    error = "Error interno del servidor",
+                    message = "Ocurrió un error procesando la solicitud.",
+                    requestId = HttpContext.TraceIdentifier
+                });
+            }
+        }
+
         [HttpGet("{id}/follow")]
         public async Task<IActionResult> GetFollow(string id)
         {
@@ -257,5 +399,23 @@ namespace GrammarService.Controllers
                 throw;
             }
         }
+    }
+
+    /// <summary>
+    /// Request DTO para crear una gramática
+    /// </summary>
+    public class CreateGrammarRequest
+    {
+        public string StartSymbol { get; set; } = string.Empty;
+        public List<ProductionRequest> Productions { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Request DTO para una producción
+    /// </summary>
+    public class ProductionRequest
+    {
+        public string NonTerminal { get; set; } = string.Empty;
+        public string RightSide { get; set; } = string.Empty;
     }
 }
