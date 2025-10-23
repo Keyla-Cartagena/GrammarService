@@ -351,6 +351,48 @@ namespace GrammarService.Controllers
         }
 
         /// <summary>
+        /// Obtiene todas las gramáticas
+        /// </summary>
+        [HttpGet]
+        public async Task<IActionResult> GetAllGrammars()
+        {
+            try
+            {
+                var grammars = await _context.Grammars
+                    .Include(g => g.Productions)
+                    .AsNoTracking()
+                    .ToListAsync();
+
+                if (!grammars.Any())
+                    return Ok(new List<object>());
+
+                var result = grammars.Select(g => new
+                {
+                    id = g.Id,
+                    startSymbol = g.StartSymbol,
+                    productions = g.Productions.Select(p => new
+                    {
+                        nonTerminal = p.NonTerminal,
+                        rightSide = p.RightSide
+                    })
+                });
+
+                return Ok(result);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error al obtener todas las gramáticas");
+                return StatusCode(500, new
+                {
+                    error = "Error interno del servidor",
+                    message = "No se pudieron cargar las gramáticas.",
+                    requestId = HttpContext.TraceIdentifier
+                });
+            }
+        }
+
+
+        /// <summary>
         /// Obtiene una gramática desde la base de datos por su ID (string)
         /// </summary>
         private async Task<Grammar?> GetGrammarByIdAsync(string id)
