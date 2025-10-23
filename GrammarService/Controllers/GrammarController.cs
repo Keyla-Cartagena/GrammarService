@@ -165,6 +165,66 @@ namespace GrammarService.Controllers
             }
         }
 
+        [HttpDelete("{id}")]
+        public async Task<IActionResult> DeleteGrammar(string id)
+        {
+            try
+            {
+                // Validar el id
+                if (string.IsNullOrWhiteSpace(id))
+                {
+                    return BadRequest(new { error = "El identificador de la gramática es requerido" });
+                }
+
+                // Buscar la gramática
+                var grammar = await _context.Grammars
+                    .Include(g => g.Productions)
+                    .FirstOrDefaultAsync(g => g.Id == id);
+
+                if (grammar == null)
+                {
+                    return NotFound(new { error = $"No se encontró una gramática con el ID '{id}'" });
+                }
+
+                // Eliminar las producciones asociadas
+                _context.Productions.RemoveRange(grammar.Productions);
+
+                // Eliminar la gramática
+                _context.Grammars.Remove(grammar);
+                await _context.SaveChangesAsync();
+
+                _logger.LogInformation($"Gramática {id} eliminada exitosamente junto con sus {grammar.Productions.Count} producciones");
+
+                return Ok(new
+                {
+                    message = "Gramática eliminada exitosamente",
+                    id = grammar.Id,
+                    deletedProductions = grammar.Productions.Count
+                });
+            }
+            catch (DbUpdateException ex)
+            {
+                _logger.LogError(ex, $"Error al eliminar la gramática {id} de la base de datos");
+                return StatusCode(500, new
+                {
+                    error = "Error al eliminar de la base de datos",
+                    message = "No se pudo eliminar la gramática. Por favor, intenta nuevamente.",
+                    requestId = HttpContext.TraceIdentifier
+                });
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, $"Error inesperado al eliminar la gramática {id}");
+                return StatusCode(500, new
+                {
+                    error = "Error interno del servidor",
+                    message = "Ocurrió un error procesando la solicitud.",
+                    requestId = HttpContext.TraceIdentifier
+                });
+            }
+        }
+
+
         [HttpGet("{id}/follow")]
         public async Task<IActionResult> GetFollow(string id)
         {
@@ -442,6 +502,8 @@ namespace GrammarService.Controllers
             }
         }
     }
+
+
 
     /// <summary>
     /// Request DTO para crear una gramática

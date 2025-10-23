@@ -15,7 +15,7 @@ namespace GrammarService.Services
         public void ClearCache()
         {
             _firstCache.Clear();
-            _followCache.Clear();
+            _followCache.Clear();    
         }
 
         /// <summary>
@@ -56,7 +56,12 @@ namespace GrammarService.Services
 
             if (!productions.Any())
             {
-                throw new InvalidOperationException($"No se encontraron producciones para el símbolo '{symbol}'");
+                // Si no es un no-terminal, es un terminal
+                if (!string.IsNullOrEmpty(symbol))
+                {
+                    first.Add(symbol);
+                }
+                return;
             }
 
             foreach (var prod in productions)
@@ -67,34 +72,43 @@ namespace GrammarService.Services
                     continue;
                 }
 
-                // Analizar cada alternativa separada por comas
-                var alternatives = prod.RightSide.Split(',', StringSplitOptions.RemoveEmptyEntries);
+                // Analizar cada alternativa separada por |
+                var alternatives = prod.RightSide.Split('|', StringSplitOptions.RemoveEmptyEntries);
 
                 foreach (var alt in alternatives)
                 {
                     var trimmedAlt = alt.Trim();
 
-                    if (string.IsNullOrEmpty(trimmedAlt))
+                    if (string.IsNullOrEmpty(trimmedAlt) || trimmedAlt == "ε")
                     {
                         first.Add("ε");
                         continue;
                     }
 
+                    // Dividir en símbolos (por espacios)
+                    var symbols = trimmedAlt.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
                     // Procesar la secuencia de símbolos
                     bool allHaveEpsilon = true;
 
-                    for (int i = 0; i < trimmedAlt.Length && allHaveEpsilon; i++)
+                    foreach (var sym in symbols)
                     {
-                        var currentSymbol = trimmedAlt[i].ToString();
+                        if (!allHaveEpsilon)
+                            break;
 
-                        // Si es terminal
-                        if (IsTerminal(trimmedAlt[i]))
+                        var currentSymbol = sym.Trim();
+
+                        if (string.IsNullOrEmpty(currentSymbol))
+                            continue;
+
+                        // Si es terminal (no tiene producciones o es minúscula/especial)
+                        if (IsTerminal(grammar, currentSymbol))
                         {
                             first.Add(currentSymbol);
                             allHaveEpsilon = false;
                         }
                         // Si es no terminal
-                        else if (IsNonTerminal(trimmedAlt[i]))
+                        else
                         {
                             var firstOfSymbol = new HashSet<string>();
                             ComputeFirstRecursive(grammar, currentSymbol, firstOfSymbol, visited);
@@ -168,7 +182,7 @@ namespace GrammarService.Services
             // Iterar hasta que no haya cambios (punto fijo)
             bool changed = true;
             int iterations = 0;
-            const int maxIterations = 100; // Prevenir ciclos infinitos
+            const int maxIterations = 100;
 
             while (changed && iterations < maxIterations)
             {
@@ -177,22 +191,28 @@ namespace GrammarService.Services
 
                 foreach (var prod in grammar.Productions)
                 {
-                    var alternatives = prod.RightSide?.Split(',', StringSplitOptions.RemoveEmptyEntries) ?? Array.Empty<string>();
+                    var alternatives = prod.RightSide?.Split('|', StringSplitOptions.RemoveEmptyEntries) ?? Array.Empty<string>();
 
                     foreach (var alt in alternatives)
                     {
                         var trimmedAlt = alt.Trim();
 
-                        if (string.IsNullOrEmpty(trimmedAlt))
+                        if (string.IsNullOrEmpty(trimmedAlt) || trimmedAlt == "ε")
                             continue;
 
+                        // Dividir en símbolos (por espacios)
+                        var symbols = trimmedAlt.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                            .Select(s => s.Trim())
+                            .Where(s => !string.IsNullOrEmpty(s))
+                            .ToList();
+
                         // Buscar cada símbolo no terminal en la producción
-                        for (int i = 0; i < trimmedAlt.Length; i++)
+                        for (int i = 0; i < symbols.Count; i++)
                         {
-                            var currentSymbol = trimmedAlt[i].ToString();
+                            var currentSymbol = symbols[i];
 
                             // Solo procesar no terminales
-                            if (!IsNonTerminal(trimmedAlt[i]))
+                            if (IsTerminal(grammar, currentSymbol))
                                 continue;
 
                             if (!follows.ContainsKey(currentSymbol))
@@ -201,11 +221,11 @@ namespace GrammarService.Services
                             // Símbolos después del actual
                             bool allCanBeEpsilon = true;
 
-                            for (int j = i + 1; j < trimmedAlt.Length; j++)
+                            for (int j = i + 1; j < symbols.Count; j++)
                             {
-                                var nextSymbol = trimmedAlt[j].ToString();
+                                var nextSymbol = symbols[j];
 
-                                if (IsTerminal(trimmedAlt[j]))
+                                if (IsTerminal(grammar, nextSymbol))
                                 {
                                     // Agregar terminal a FOLLOW
                                     if (follows[currentSymbol].Add(nextSymbol))
@@ -213,7 +233,7 @@ namespace GrammarService.Services
                                     allCanBeEpsilon = false;
                                     break;
                                 }
-                                else if (IsNonTerminal(trimmedAlt[j]))
+                                else
                                 {
                                     // Agregar FIRST del siguiente (sin ε)
                                     var firstOfNext = ComputeFirst(grammar, nextSymbol);
@@ -268,55 +288,61 @@ namespace GrammarService.Services
 
             try
             {
-                if (string.IsNullOrEmpty(production.RightSide))
+                if (string.IsNullOrEmpty(production.RightSide) || production.RightSide.Trim() == "ε")
                 {
                     predict.UnionWith(ComputeFollow(grammar, production.NonTerminal));
                     return predict;
                 }
 
-                var alternatives = production.RightSide.Split(',', StringSplitOptions.RemoveEmptyEntries);
+                var trimmedAlt = production.RightSide.Trim();
 
-                foreach (var alt in alternatives)
+                // Dividir en símbolos (por espacios)
+                var symbols = trimmedAlt.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(s => s.Trim())
+                    .Where(s => !string.IsNullOrEmpty(s))
+                    .ToList();
+
+                bool allHaveEpsilon = true;
+
+                foreach (var sym in symbols)
                 {
-                    var trimmedAlt = alt.Trim();
+                    if (!allHaveEpsilon)
+                        break;
 
-                    if (string.IsNullOrEmpty(trimmedAlt))
+                    var currentSymbol = sym.Trim();
+
+                    if (string.IsNullOrEmpty(currentSymbol))
+                        continue;
+
+                    if (currentSymbol == "ε")
                     {
-                        predict.UnionWith(ComputeFollow(grammar, production.NonTerminal));
                         continue;
                     }
 
-                    bool allHaveEpsilon = true;
-
-                    for (int i = 0; i < trimmedAlt.Length && allHaveEpsilon; i++)
+                    if (IsTerminal(grammar, currentSymbol))
                     {
-                        var currentSymbol = trimmedAlt[i].ToString();
+                        predict.Add(currentSymbol);
+                        allHaveEpsilon = false;
+                    }
+                    else
+                    {
+                        var firstOfSymbol = ComputeFirst(grammar, currentSymbol);
 
-                        if (IsTerminal(trimmedAlt[i]))
+                        foreach (var f in firstOfSymbol.Where(x => x != "ε"))
                         {
-                            predict.Add(currentSymbol);
+                            predict.Add(f);
+                        }
+
+                        if (!firstOfSymbol.Contains("ε"))
+                        {
                             allHaveEpsilon = false;
                         }
-                        else if (IsNonTerminal(trimmedAlt[i]))
-                        {
-                            var firstOfSymbol = ComputeFirst(grammar, currentSymbol);
-
-                            foreach (var f in firstOfSymbol.Where(x => x != "ε"))
-                            {
-                                predict.Add(f);
-                            }
-
-                            if (!firstOfSymbol.Contains("ε"))
-                            {
-                                allHaveEpsilon = false;
-                            }
-                        }
                     }
+                }
 
-                    if (allHaveEpsilon)
-                    {
-                        predict.UnionWith(ComputeFollow(grammar, production.NonTerminal));
-                    }
+                if (allHaveEpsilon)
+                {
+                    predict.UnionWith(ComputeFollow(grammar, production.NonTerminal));
                 }
             }
             catch (Exception ex)
@@ -328,19 +354,22 @@ namespace GrammarService.Services
         }
 
         /// <summary>
-        /// Verifica si un símbolo es terminal (minúscula o no letra)
+        /// Verifica si un símbolo es terminal
+        /// Un símbolo es terminal si NO tiene producciones en la gramática
+        /// o si es un símbolo especial (como operadores, paréntesis, etc.)
         /// </summary>
-        private bool IsTerminal(char symbol)
+        private bool IsTerminal(Grammar grammar, string symbol)
         {
-            return char.IsLower(symbol) || !char.IsLetter(symbol);
-        }
+            if (string.IsNullOrEmpty(symbol))
+                return true;
 
-        /// <summary>
-        /// Verifica si un símbolo es no terminal (mayúscula)
-        /// </summary>
-        private bool IsNonTerminal(char symbol)
-        {
-            return char.IsUpper(symbol);
+            // Símbolos especiales son terminales
+            if (symbol == "ε" || symbol == "$")
+                return true;
+
+            // Si tiene producciones, es no-terminal
+            var hasProductions = grammar.Productions.Any(p => p.NonTerminal == symbol);
+            return !hasProductions;
         }
     }
 }
